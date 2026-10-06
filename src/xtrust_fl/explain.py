@@ -13,16 +13,22 @@ def integrated_gradients(
     x: torch.Tensor,
     targets: torch.Tensor,
     baseline: torch.Tensor | None = None,
-    steps: int = 16,
+    steps: int = 32,
 ) -> torch.Tensor:
-    """Minimal Integrated Gradients implementation for tabular models.
+    """Integrated Gradients for tabular models using trapezoidal integration.
 
-    Targets are fixed labels from a trusted reference set to keep candidate-model
-    explanations comparable across clients.
+    Targets are fixed labels from a trusted reference set so candidate-model
+    explanations remain comparable across clients. The implementation includes
+    both path endpoints and uses the trapezoidal rule rather than a right-endpoint
+    approximation.
     """
+    if steps < 1:
+        raise ValueError("steps must be >= 1")
     model = deepcopy(model).cpu().eval()
     x = x.detach().cpu()
-    targets = targets.detach().cpu().long()
+    targets = targets.detach().cpu().long().reshape(-1)
+    if x.ndim != 2 or len(targets) != len(x):
+        raise ValueError("x must be 2D and targets must align with samples")
     if baseline is None:
         baseline = torch.zeros_like(x)
     else:
@@ -30,29 +36,55 @@ def integrated_gradients(
         if baseline.shape != x.shape:
             baseline = baseline.expand_as(x)
 
-    total_grad = torch.zeros_like(x)
-    for alpha in torch.linspace(0.0, 1.0, steps + 1)[1:]:
+    grads = []
+    for alpha in torch.linspace(0.0, 1.0, steps + 1):
         xi = (baseline + alpha * (x - baseline)).detach().requires_grad_(True)
         logits = model(xi)
-        selected = logits.gather(1, targets.view(-1, 1)).sum()
-        grads = torch.autograd.grad(selected, xi, retain_graph=False)[0]
-        total_grad += grads.detach()
-    avg_grad = total_grad / float(steps)
+        selected = logits.gather(1, targets[:, None]).sum()
+        grad = torch.autograd.grad(selected, xi, retain_graph=False)[0]
+        grads.append(grad.detach())
+    stacked = torch.stack(grads, dim=0)
+    avg_grad = (0.5 * stacked[0] + stacked[1:-1].sum(dim=0) + 0.5 * stacked[-1]) / float(steps)
     return (x - baseline) * avg_grad
+
+
+def ig_completeness_error(
+    model: nn.Module,
+    x: torch.Tensor,
+    targets: torch.Tensor,
+    baseline: torch.Tensor | None = None,
+    steps: int = 32,
+) -> np.ndarray:
+    """Absolute IG completeness residual for each trusted-reference sample."""
+    m = deepcopy(model).cpu().eval()
+    x_cpu = x.detach().cpu()
+    t = targets.detach().cpu().long().reshape(-1)
+    b = torch.zeros_like(x_cpu) if baseline is None else baseline.detach().cpu().expand_as(x_cpu)
+    attr = integrated_gradients(m, x_cpu, t, baseline=b, steps=steps)
+    with torch.no_grad():
+        fx = m(x_cpu).gather(1, t[:, None]).squeeze(1)
+        fb = m(b).gather(1, t[:, None]).squeeze(1)
+    residual = torch.abs(attr.sum(dim=1) - (fx - fb))
+    return residual.numpy()
 
 
 def attribution_fingerprint(
     model: nn.Module,
     x_ref: torch.Tensor,
     y_ref: torch.Tensor,
-    steps: int = 16,
+    steps: int = 32,
 ) -> np.ndarray:
     attr = integrated_gradients(model, x_ref, y_ref, steps=steps)
     return attr.abs().mean(dim=0).numpy()
 
 
 def explanation_prototype(fingerprints: list[np.ndarray]) -> np.ndarray:
-    return np.median(np.stack(fingerprints, axis=0), axis=0)
+    if not fingerprints:
+        raise ValueError("at least one explanation fingerprint is required")
+    stack = np.stack(fingerprints, axis=0)
+    if not np.all(np.isfinite(stack)):
+        raise ValueError("explanation fingerprints must be finite")
+    return np.median(stack, axis=0)
 
 
 def explanation_features(
@@ -60,11 +92,14 @@ def explanation_features(
     top_k: int = 10,
 ) -> np.ndarray:
     proto = explanation_prototype(fingerprints)
-    k = min(top_k, len(proto))
+    k = min(max(int(top_k), 1), len(proto))
     proto_top = set(np.argsort(proto)[-k:].tolist())
     rows = []
     denom = np.linalg.norm(proto, ord=1) + 1e-12
     for fp in fingerprints:
+        fp = np.asarray(fp, dtype=float)
+        if fp.shape != proto.shape:
+            raise ValueError("all explanation fingerprints must have the same shape")
         rho = spearmanr(fp, proto).statistic
         if not np.isfinite(rho):
             rho = 0.0
@@ -84,5 +119,6 @@ def robust_explanation_anomaly(fingerprints: list[np.ndarray], top_k: int = 10) 
     for j in range(features.shape[1]):
         med = np.median(features[:, j])
         mad = np.median(np.abs(features[:, j] - med))
-        z[:, j] = np.abs(features[:, j] - med) / (1.4826 * max(float(mad), 1e-12))
+        scale = 1.4826 * max(float(mad), 1e-12)
+        z[:, j] = np.abs(features[:, j] - med) / scale
     return np.mean(z, axis=1)
