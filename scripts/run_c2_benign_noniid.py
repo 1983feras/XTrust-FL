@@ -119,7 +119,7 @@ def main():
     parts, accepted_min_size = robust_dirichlet_partition(ytr, a.clients, a.alpha, a.seed)
     if any(len(p) == 0 for p in parts):
         raise RuntimeError("Partition contains an empty client")
-    dists = client_label_distributions(ytr, parts, num_classes=2)
+    dists = client_label_distributions(ytr, parts)
     js = js_divergence_to_global(dists)
     sizes = np.asarray([len(p) for p in parts], dtype=float)
     quantity_skew = np.abs(np.log((sizes + 1.0) / (np.median(sizes) + 1.0)))
