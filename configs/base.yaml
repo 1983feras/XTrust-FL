@@ -1,0 +1,41 @@
+experiment:
+  name: xtrust_mre_01
+  seed: 42
+
+dataset:
+  name: CICIoT2023
+  task: binary
+  target: label
+
+federation:
+  clients: 20
+  participation: 0.50
+  rounds: 30
+  local_epochs: 2
+
+non_iid:
+  method: dirichlet
+  alpha: 0.5
+
+model:
+  hidden: [128, 64, 32]
+  dropout: 0.20
+
+training:
+  optimizer: adam
+  learning_rate: 0.001
+  batch_size: 128
+  fedprox_mu: 0.0
+
+attack:
+  type: none
+  malicious_fraction: 0.0
+  scale: 5.0
+
+xtrust:
+  enabled: false
+  lambda_update: 0.5
+  lambda_explanation: 0.5
+  temporal_gamma: 0.8
+  reject_threshold: 0.15
+  clip_mad_k: 2.5
