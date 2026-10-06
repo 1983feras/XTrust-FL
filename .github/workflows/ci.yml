@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  smoke-test:
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -20,7 +20,14 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytest
+
+      - name: Run unit tests
+        env:
+          PYTHONPATH: src
+        run: pytest -q
 
       - name: Run synthetic smoke test
+        env:
+          PYTHONPATH: src
         run: python scripts/smoke_test.py
