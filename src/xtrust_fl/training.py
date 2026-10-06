@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Iterable
 
 import torch
 from torch import nn
@@ -37,9 +36,11 @@ def local_train(
     fedprox_mu: float = 0.0,
     device: str = "cpu",
 ) -> tuple[nn.Module, float]:
+    # Never move/mutate the shared global model. Each client receives a deep copy;
+    # FedProx anchors are independent tensors placed on the requested device.
     model = deepcopy(global_model).to(device)
     model.train()
-    reference = [p.detach().clone() for p in global_model.to(device).parameters()]
+    reference = [p.detach().clone().to(device) for p in global_model.parameters()]
     loader = DataLoader(TensorDataset(x, y), batch_size=batch_size, shuffle=True)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
