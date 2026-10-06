@@ -50,12 +50,38 @@ def train_model(model, X, y, device, epochs=1, batch_size=512, lr=1e-3):
     for _ in range(epochs):
         m.train()
         for xb, yb in loader:
-            xb, yb = xb.to(device), yb.to(device); opt.zero_grad(); loss = lossfn(m(xb), yb); loss.backward(); opt.step()
+            xb, yb=xb.to(device), yb.to(device); opt.zero_grad(); loss=lossfn(m(xb), yb); loss.backward(); opt.step()
     return m.cpu()
 
 
 def q95(x):
     return float(np.quantile(np.asarray(x, dtype=float), 0.95))
+
+
+def robust_dirichlet_partition(y, num_clients, alpha, seed):
+    """Construct a severe Non-IID partition without silently changing alpha.
+
+    For very small alpha and imbalanced binary data, a strict minimum client size
+    can make rejection sampling fail even on a large dataset. We therefore try a
+    short descending minimum-size schedule while keeping the requested alpha,
+    client count, labels, and seed family unchanged. The actually accepted
+    minimum size is reported in the result artifact.
+    """
+    attempts = [50, 20, 10, 5, 1]
+    last_error = None
+    for min_size in attempts:
+        try:
+            parts = dirichlet_partition(
+                y, num_clients, alpha, seed,
+                min_size=min_size,
+                max_retries=5000,
+            )
+            return parts, min_size
+        except RuntimeError as exc:
+            last_error = exc
+    raise RuntimeError(
+        "Could not construct the requested severe Non-IID partition even with min_size=1"
+    ) from last_error
 
 
 def main():
@@ -90,7 +116,9 @@ def main():
     base = XTrustMLP(Xtr.shape[1], 2)
     base = train_model(base, Xtr, ytr, device, epochs=a.pretrain_epochs)
 
-    parts = dirichlet_partition(ytr, a.clients, a.alpha, a.seed, min_size=50)
+    parts, accepted_min_size = robust_dirichlet_partition(ytr, a.clients, a.alpha, a.seed)
+    if any(len(p) == 0 for p in parts):
+        raise RuntimeError("Partition contains an empty client")
     dists = client_label_distributions(ytr, parts, num_classes=2)
     js = js_divergence_to_global(dists)
     sizes = np.asarray([len(p) for p in parts], dtype=float)
@@ -128,6 +156,7 @@ def main():
         "provenance": {"url": URL, "sha256": SHA256},
         "integrity": {"no_malicious_clients": True, "target_metadata_dropped": list(map(str, dropped)), "imputer_fit": "train_only", "scaler_fit": "train_only", "threshold_source": "benign_calibration_clients_only"},
         "config": vars(a), "device": str(device), "n_features": int(Xtr.shape[1]),
+        "partition": {"requested_alpha": float(a.alpha), "accepted_min_client_size": int(accepted_min_size), "actual_min_client_size": int(sizes.min()), "actual_max_client_size": int(sizes.max())},
         "calibration_client_ids": cal_ids.tolist(), "evaluation_client_ids": eval_ids.tolist(),
         "client_sizes_original": sizes.astype(int).tolist(), "client_sizes_used": used_sizes,
         "heterogeneity": {"js_divergence": js.tolist(), "quantity_skew": quantity_skew.tolist(), "js_mean": float(js.mean()), "js_max": float(js.max())},
