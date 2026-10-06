@@ -15,13 +15,7 @@ def integrated_gradients(
     baseline: torch.Tensor | None = None,
     steps: int = 32,
 ) -> torch.Tensor:
-    """Integrated Gradients for tabular models using trapezoidal integration.
-
-    Targets are fixed labels from a trusted reference set so candidate-model
-    explanations remain comparable across clients. The implementation includes
-    both path endpoints and uses the trapezoidal rule rather than a right-endpoint
-    approximation.
-    """
+    """Integrated Gradients for tabular models using trapezoidal integration."""
     if steps < 1:
         raise ValueError("steps must be >= 1")
     model = deepcopy(model).cpu().eval()
@@ -55,7 +49,6 @@ def ig_completeness_error(
     baseline: torch.Tensor | None = None,
     steps: int = 32,
 ) -> np.ndarray:
-    """Absolute IG completeness residual for each trusted-reference sample."""
     m = deepcopy(model).cpu().eval()
     x_cpu = x.detach().cpu()
     t = targets.detach().cpu().long().reshape(-1)
@@ -113,12 +106,36 @@ def explanation_features(
     return np.asarray(rows, dtype=float)
 
 
+def _robust_scale(values: np.ndarray) -> float:
+    """Stable robust scale for small/discrete client populations.
+
+    MAD can be exactly zero for top-k Jaccard drift because many clients may
+    share the same discrete value. Falling back to 1e-12 turns ordinary drift
+    into ~1e10 anomaly scores. Use IQR next and, if that is also degenerate,
+    standard deviation. A constant feature contributes zero anomaly.
+    """
+    x = np.asarray(values, dtype=float)
+    med = np.median(x)
+    mad = np.median(np.abs(x - med))
+    scale = 1.4826 * float(mad)
+    if scale > 1e-8:
+        return scale
+    q25, q75 = np.quantile(x, [0.25, 0.75])
+    scale = float(q75 - q25) / 1.349
+    if scale > 1e-8:
+        return scale
+    scale = float(np.std(x, ddof=0))
+    return scale if scale > 1e-8 else 0.0
+
+
 def robust_explanation_anomaly(fingerprints: list[np.ndarray], top_k: int = 10) -> np.ndarray:
     features = explanation_features(fingerprints, top_k=top_k)
     z = np.zeros_like(features)
     for j in range(features.shape[1]):
         med = np.median(features[:, j])
-        mad = np.median(np.abs(features[:, j] - med))
-        scale = 1.4826 * max(float(mad), 1e-12)
-        z[:, j] = np.abs(features[:, j] - med) / scale
+        scale = _robust_scale(features[:, j])
+        if scale > 0.0:
+            z[:, j] = np.abs(features[:, j] - med) / scale
+        else:
+            z[:, j] = 0.0
     return np.mean(z, axis=1)
