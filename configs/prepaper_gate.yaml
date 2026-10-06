@@ -1,0 +1,84 @@
+# XTrust-FL pre-paper validation gate
+# Do not tune these choices after inspecting final test outcomes.
+seeds: [42, 77, 100, 999, 2026]
+
+clients:
+  debug_n: 20
+  final_n: 50
+  participation_rate: 0.5
+
+non_iid:
+  dirichlet_alpha: [10.0, 1.0, 0.5, 0.1]
+  severe_alpha: 0.1
+  report_realized_js_divergence: true
+
+malicious_fraction: [0.10, 0.20, 0.30, 0.40]
+
+reference_set:
+  sizes: [100, 500, 1000, 5000]
+  trusted_server_side: true
+  never_use_test_data: true
+
+attacks:
+  - label_flip
+  - sign_flip
+  - scaling
+  - backdoor
+  - adaptive_stealth
+  - colluding_stealth
+
+defenses:
+  - fedavg
+  - fedprox
+  - coordinate_median
+  - trimmed_mean
+  - krum
+  - multi_krum
+  - fltrust
+  - update_only
+  - raw_xai
+  - xtrust_fl
+
+xai:
+  frequent_method: integrated_gradients
+  ig_steps: 16
+  top_k: 10
+  event_triggered_comparison: true
+  posthoc_shap: true
+
+ablation:
+  - update_only
+  - update_plus_raw_xai
+  - update_plus_calibrated_xai
+  - full_xtrust_fl
+
+primary_gate:
+  C2:
+    description: severe Non-IID, no attacker
+    alpha: 0.1
+    objective: minimize benign-client false positives
+  C4:
+    description: severe Non-IID, adaptive stealth poisoning
+    alpha: 0.1
+    objective: detect malicious clients beyond update geometry
+
+metrics:
+  task: [accuracy, macro_f1, weighted_f1, precision, recall, auroc, auprc]
+  malicious_detection: [auroc_mal, auprc_mal, tpr_mal, fpr_benign]
+  backdoor: [asr]
+  explanation: [spearman_stability, topk_jaccard, attribution_l1_drift, faithfulness]
+  efficiency: [round_time_s, explanation_time_s, inference_latency_s, communication_bytes, peak_memory_mb]
+
+statistics:
+  report: [mean, sd, ci95, effect_size]
+  paired_tests: true
+  alpha: 0.05
+
+integrity:
+  save_exact_partition_digest: true
+  save_malicious_client_ids: true
+  save_dataset_sha256: true
+  save_git_commit: true
+  save_per_round_metrics: true
+  prohibit_test_calibration: true
+  prohibit_unverified_numbers_in_manuscript: true
