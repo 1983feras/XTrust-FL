@@ -56,33 +56,23 @@ def build_round_batch(
         if idx.size == 0:
             continue
         local_model, loss = local_train(
-            global_model,
-            x_train[idx],
-            y_train[idx],
-            epochs=epochs,
-            batch_size=batch_size,
-            lr=lr,
-            fedprox_mu=fedprox_mu,
-            device=device,
+            global_model, x_train[idx], y_train[idx], epochs=epochs,
+            batch_size=batch_size, lr=lr, fedprox_mu=fedprox_mu, device=device,
         )
         delta = parameter_delta(local_model, global_model)
         if transform_update is not None:
             delta = transform_update(cid, delta)
-        kept_ids.append(int(cid))
-        updates.append(delta.detach().cpu())
-        counts.append(int(idx.size))
-        losses.append(float(loss))
+        kept_ids.append(int(cid)); updates.append(delta.detach().cpu())
+        counts.append(int(idx.size)); losses.append(float(loss))
     if not updates:
         raise RuntimeError("No client updates were produced")
     return RoundBatch(client_ids=kept_ids, updates=updates, sample_counts=counts, losses=losses)
 
 
 def aggregate_same_round(
-    batch: RoundBatch,
-    *,
-    xtrust_scores: np.ndarray | None = None,
-    server_update: torch.Tensor | None = None,
-    trim_ratio: float = 0.2,
+    batch: RoundBatch, *, xtrust_scores: np.ndarray | None = None,
+    xtrust_reject_threshold: float = 0.15,
+    server_update: torch.Tensor | None = None, trim_ratio: float = 0.2,
     krum_f: int = 0,
 ) -> dict[str, torch.Tensor]:
     """Run multiple defenses on one immutable set of client updates."""
@@ -100,7 +90,9 @@ def aggregate_same_round(
     if xtrust_scores is not None:
         if len(xtrust_scores) != len(u):
             raise ValueError("xtrust_scores must align with participating clients")
-        out["xtrust_fl"] = weighted_clipped_aggregate(u, n, xtrust_scores)
+        out["xtrust_fl"] = weighted_clipped_aggregate(
+            u, n, xtrust_scores, reject_threshold=xtrust_reject_threshold
+        )
     return out
 
 
