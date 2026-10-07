@@ -50,7 +50,7 @@ def build_round_batch(
     device: str = "cpu",
     transform_update: Callable[[int, torch.Tensor], torch.Tensor] | None = None,
 ) -> RoundBatch:
-    updates, counts, losses = [], [], []
+    updates, counts, losses, kept_ids = [], [], [], []
     for cid in client_ids:
         idx = np.asarray(partitions[cid], dtype=np.int64)
         if idx.size == 0:
@@ -68,12 +68,13 @@ def build_round_batch(
         delta = parameter_delta(local_model, global_model)
         if transform_update is not None:
             delta = transform_update(cid, delta)
+        kept_ids.append(int(cid))
         updates.append(delta.detach().cpu())
         counts.append(int(idx.size))
         losses.append(float(loss))
     if not updates:
         raise RuntimeError("No client updates were produced")
-    return RoundBatch(client_ids=client_ids[:len(updates)], updates=updates, sample_counts=counts, losses=losses)
+    return RoundBatch(client_ids=kept_ids, updates=updates, sample_counts=counts, losses=losses)
 
 
 def aggregate_same_round(
