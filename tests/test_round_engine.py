@@ -1,7 +1,8 @@
 import numpy as np
 import torch
+from torch import nn
 
-from xtrust_fl.round_engine import RoundBatch, aggregate_same_round, select_clients
+from xtrust_fl.round_engine import RoundBatch, aggregate_same_round, build_round_batch, select_clients
 
 
 def test_client_selection_is_deterministic():
@@ -9,6 +10,26 @@ def test_client_selection_is_deterministic():
     b = select_clients(20, 0.5, seed=42)
     assert a == b
     assert len(a) == 10
+
+
+def test_build_round_batch_preserves_ids_when_middle_partition_is_empty():
+    torch.manual_seed(0)
+    model = nn.Linear(2, 2)
+    x = torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0], [3.0, 3.0]])
+    y = torch.tensor([0, 1, 0, 1])
+    partitions = [[0, 1], [], [2, 3]]
+    batch = build_round_batch(
+        model,
+        x,
+        y,
+        partitions,
+        client_ids=[0, 1, 2],
+        epochs=1,
+        batch_size=2,
+        lr=1e-3,
+    )
+    assert batch.client_ids == [0, 2]
+    assert len(batch.updates) == len(batch.sample_counts) == len(batch.losses) == 2
 
 
 def test_all_defenses_consume_same_round_updates():
