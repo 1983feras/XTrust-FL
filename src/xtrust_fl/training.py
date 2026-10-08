@@ -35,6 +35,7 @@ def local_train(
     lr: float = 1e-3,
     fedprox_mu: float = 0.0,
     device: str = "cpu",
+    class_weights: torch.Tensor | None = None,
 ) -> tuple[nn.Module, float]:
     # Never move/mutate the shared global model. Each client receives a deep copy;
     # FedProx anchors are independent tensors placed on the requested device.
@@ -43,7 +44,8 @@ def local_train(
     reference = [p.detach().clone().to(device) for p in global_model.parameters()]
     loader = DataLoader(TensorDataset(x, y), batch_size=batch_size, shuffle=True)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.CrossEntropyLoss()
+    weight = None if class_weights is None else class_weights.detach().clone().to(device=device, dtype=torch.float32)
+    criterion = nn.CrossEntropyLoss(weight=weight)
 
     last_loss = 0.0
     for _ in range(epochs):
