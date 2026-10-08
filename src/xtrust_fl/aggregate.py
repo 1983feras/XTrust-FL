@@ -37,6 +37,18 @@ def relative_trust_weights(client_scores:np.ndarray,clean_scores:np.ndarray,q_mi
     med=float(np.median(c)); mad=float(np.median(np.abs(c-med))); sigma=max(1.4826*mad,1e-6); z=(s-med)/sigma; r=1/(1+np.exp(-np.clip(z,-60,60))); q=q_min+(1-q_min)*r
     return q,{"clean_median":med,"clean_mad":mad,"clean_sigma":sigma,"z":z.tolist(),"relative_sigmoid":r.tolist()}
 
+def clean_threshold_prefilter(client_scores:np.ndarray,clean_scores:np.ndarray,quantile:float=.05,min_retained:int=3):
+    """C4-v7 frozen prefilter: clean-only quantile threshold with deterministic top-score fallback."""
+    s=np.asarray(client_scores,float); c=np.asarray(clean_scores,float)
+    if s.ndim!=1 or c.ndim!=1 or c.size==0 or not np.all(np.isfinite(s)) or not np.all(np.isfinite(c)): raise ValueError("scores must be finite 1-D arrays and clean_scores nonempty")
+    if not 0<=quantile<=1: raise ValueError("quantile must be in [0,1]")
+    if min_retained<1 or min_retained>len(s): raise ValueError("min_retained must be between 1 and number of clients")
+    tau=float(np.quantile(c,quantile)); keep=np.flatnonzero(s>=tau)
+    fallback=False
+    if keep.size<min_retained:
+        order=np.argsort(-s,kind='stable'); keep=np.sort(order[:min_retained]); fallback=True
+    return keep.astype(int),{"threshold":tau,"quantile":float(quantile),"min_retained":int(min_retained),"fallback_used":fallback}
+
 def _aggregate_with_q(updates,sample_counts,q,*,clip=False,mad_k=2.5,return_diagnostics=False,extra=None):
     _validate_updates(updates)
     if len(q)!=len(updates): raise ValueError("inputs must align")
