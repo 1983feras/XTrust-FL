@@ -1,11 +1,11 @@
 """XTrust-FL Final Study v1 runner.
 
-This runner follows docs/FINAL_STUDY_V1_FROZEN_PROTOCOL.md. It deliberately
-executes one seed/beta condition per invocation so failures are auditable and
-raw JSON remains the source of truth.
+One frozen seed/beta condition per invocation. Competing methods keep independent
+model trajectories while local-training RNG is paired by round so stochastic
+DataLoader order is not a method-specific confounder.
 """
 from __future__ import annotations
-import argparse,hashlib,json,platform,subprocess,sys,time
+import argparse,hashlib,json,platform,random,subprocess,sys,time
 from copy import deepcopy
 from pathlib import Path
 import numpy as np,pandas as pd,sklearn,torch
@@ -26,9 +26,8 @@ from xtrust_fl.scoring import compute_client_scores
 from xtrust_fl.aggregate import fedavg_aggregate,clean_threshold_prefilter
 from xtrust_fl.baselines import coordinate_median,trimmed_mean,krum,multi_krum,fltrust
 from xtrust_fl.final_study import FINAL_SEEDS,FINAL_BETAS,PRIMARY_ALPHA,PREFILTER_QUANTILE,MIN_RETAINED,TRIM_RATIO,clean_federated_warmup,malicious_client_ids,trusted_root_update
-
 METHODS=('fedavg','coordinate_median','trimmed_mean','krum','multi_krum','fltrust','xtrust_u_median','xtrust_ecal_median','xtrust_uecal_median','xtrust_uecal_trimmed')
-
+def pair_seed(s): random.seed(s);np.random.seed(s%(2**32-1));torch.manual_seed(s);torch.cuda.manual_seed_all(s) if torch.cuda.is_available() else None
 def q95(x):return max(float(np.quantile(np.asarray(x,float),.95)),1e-12)
 def trust(a):a=np.asarray(a,float);return 1/(1+np.exp(-np.clip(2-a,-60,60)))
 def git(args):
@@ -40,23 +39,19 @@ def sha(path):
   for b in iter(lambda:f.read(1<<20),b''):h.update(b)
  return h.hexdigest()
 def det_stats(score,tau,labels):
- s=np.asarray(score,float);y=np.asarray(labels,int);d=(s<tau).astype(int);tp=int(((d==1)&(y==1)).sum());fp=int(((d==1)&(y==0)).sum());tn=int(((d==0)&(y==0)).sum());fn=int(((d==0)&(y==1)).sum())
- return {'threshold':float(tau),'tp':tp,'fp':fp,'tn':tn,'fn':fn,'tpr':tp/max(tp+fn,1),'fpr':fp/max(fp+tn,1),'auroc_detection':float(roc_auc_score(y,-s)) if len(np.unique(y))==2 else None}
+ s=np.asarray(score,float);y=np.asarray(labels,int);d=(s<tau).astype(int);tp=int(((d==1)&(y==1)).sum());fp=int(((d==1)&(y==0)).sum());tn=int(((d==0)&(y==0)).sum());fn=int(((d==0)&(y==1)).sum());return {'threshold':float(tau),'tp':tp,'fp':fp,'tn':tn,'fn':fn,'tpr':tp/max(tp+fn,1),'fpr':fp/max(fp+tn,1),'auroc_detection':float(roc_auc_score(y,-s)) if len(np.unique(y))==2 else None}
 def fit_cal(base,X,Y,ps,ids,xr,yr,a,dev):
  clean=build_round_batch(base,torch.from_numpy(X),torch.from_numpy(Y),ps,ids,epochs=1,batch_size=512,lr=1e-3,fedprox_mu=a.mu,device=dev);ur=fit_update_anomaly_reference(clean.updates);u=score_update_anomaly_fixed(clean.updates,ur);fps=[];loss=[]
  for d in clean.updates:
   m=apply_delta(base,d);fps.append(attribution_fingerprint(m,xr,yr,steps=a.ig_steps));loss.append(ref_loss(m,xr,yr))
- er=fit_explanation_anomaly_reference(fps);raw=score_explanation_anomaly_fixed(fps,er);hs=RobustScaler().fit(np.asarray(loss)[:,None]);hub=HuberRegressor().fit(hs.transform(np.asarray(loss)[:,None]),raw);cal=np.maximum(0,raw-np.maximum(0,hub.predict(hs.transform(np.asarray(loss)[:,None]))));un,en=q95(u),q95(cal);U=trust(u/un);E=trust(cal/en);UE=compute_client_scores(u/un,cal/en,previous_scores=None,temporal_gamma=0)
- return {'ur':ur,'er':er,'hs':hs,'hub':hub,'un':un,'en':en,'clean':{'U':U,'Ecal':E,'U+Ecal':UE}}
+ er=fit_explanation_anomaly_reference(fps);raw=score_explanation_anomaly_fixed(fps,er);hs=RobustScaler().fit(np.asarray(loss)[:,None]);hub=HuberRegressor().fit(hs.transform(np.asarray(loss)[:,None]),raw);cal=np.maximum(0,raw-np.maximum(0,hub.predict(hs.transform(np.asarray(loss)[:,None]))));un,en=q95(u),q95(cal);U=trust(u/un);E=trust(cal/en);UE=compute_client_scores(u/un,cal/en,previous_scores=None,temporal_gamma=0);return {'ur':ur,'er':er,'hs':hs,'hub':hub,'un':un,'en':en,'clean':{'U':U,'Ecal':E,'U+Ecal':UE}}
 def score_attacked(base,batch,cl,xr,yr,a):
  u=score_update_anomaly_fixed(batch.updates,cl['ur']);fps=[];loss=[]
  for d in batch.updates:
   m=apply_delta(base,d);fps.append(attribution_fingerprint(m,xr,yr,steps=a.ig_steps));loss.append(ref_loss(m,xr,yr))
  raw=score_explanation_anomaly_fixed(fps,cl['er']);cal=np.maximum(0,raw-np.maximum(0,cl['hub'].predict(cl['hs'].transform(np.asarray(loss)[:,None]))));U=trust(u/cl['un']);E=trust(cal/cl['en']);UE=compute_client_scores(u/cl['un'],cal/cl['en'],previous_scores=None,temporal_gamma=0);return {'U':U,'Ecal':E,'U+Ecal':UE}
 def prefilter_delta(batch,score,clean_score,kind='median'):
- keep,d=clean_threshold_prefilter(score,clean_score,quantile=PREFILTER_QUANTILE,min_retained=MIN_RETAINED);uu=[batch.updates[int(i)] for i in keep]
- out=coordinate_median(uu) if kind=='median' else trimmed_mean(uu,TRIM_RATIO)
- return out,keep,d
+ keep,d=clean_threshold_prefilter(score,clean_score,quantile=PREFILTER_QUANTILE,min_retained=MIN_RETAINED);uu=[batch.updates[int(i)] for i in keep];out=coordinate_median(uu) if kind=='median' else trimmed_mean(uu,TRIM_RATIO);return out,keep,d
 def main():
  ap=argparse.ArgumentParser();ap.add_argument('--seed',type=int,required=True);ap.add_argument('--beta',type=float,required=True);ap.add_argument('--rounds',type=int,default=3);ap.add_argument('--warmup-rounds',type=int,default=3);ap.add_argument('--clients',type=int,default=50);ap.add_argument('--alpha',type=float,default=PRIMARY_ALPHA);ap.add_argument('--cap',type=int,default=12000);ap.add_argument('--mu',type=float,default=.01);ap.add_argument('--ref-size',type=int,default=128);ap.add_argument('--ig-steps',type=int,default=16);ap.add_argument('--out',required=True);a=ap.parse_args()
  if a.seed not in FINAL_SEEDS:raise ValueError(f'seed must be frozen final seed {FINAL_SEEDS}')
@@ -67,8 +62,8 @@ def main():
  ps,mn=parts(Y,a.clients,a.alpha,a.seed);ps=cap(ps,a.cap,a.seed);ids=list(range(a.clients));init=XTrustMLP(X.shape[1],2);warm,warm_hist=clean_federated_warmup(init,torch.from_numpy(X),torch.from_numpy(Y),ps,rounds=a.warmup_rounds,epochs=1,batch_size=512,lr=1e-3,fedprox_mu=a.mu,device=dev);models={k:deepcopy(warm) for k in METHODS};bad=malicious_client_ids(a.clients,a.beta,a.seed);badset=set(bad);rr=np.random.default_rng(a.seed+909).choice(len(V),min(a.ref_size,len(V)),replace=False);xr=torch.from_numpy(V[rr]);yr=torch.from_numpy(Vy[rr]);history=[]
  for r in range(a.rounds):
   row={'round':r+1,'methods':{}}
-  for mi,name in enumerate(METHODS):
-   rt=time.perf_counter();base=models[name];cl=fit_cal(base,X,Y,ps,ids,xr,yr,a,dev)
+  for name in METHODS:
+   rt=time.perf_counter();base=models[name];pair_seed(a.seed+10000*(r+1)+101);cl=fit_cal(base,X,Y,ps,ids,xr,yr,a,dev);pair_seed(a.seed+10000*(r+1)+202)
    def attack(cid,d):return sign_flip(d,1.) if cid in badset else d
    batch=build_round_batch(base,torch.from_numpy(X),torch.from_numpy(Y),ps,ids,epochs=1,batch_size=512,lr=1e-3,fedprox_mu=a.mu,device=dev,transform_update=attack);labels=np.asarray([cid in badset for cid in batch.client_ids],int);scores=score_attacked(base,batch,cl,xr,yr,a);diag={}
    if name=='fedavg':delta=fedavg_aggregate(batch.updates,batch.sample_counts)
@@ -77,7 +72,7 @@ def main():
    elif name=='krum':delta=krum(batch.updates,len(bad))
    elif name=='multi_krum':delta=multi_krum(batch.updates,len(bad))
    elif name=='fltrust':
-    root=trusted_root_update(base,xr,yr,epochs=1,batch_size=min(128,len(xr)),lr=1e-3,fedprox_mu=a.mu,device=dev);delta,ts=fltrust(batch.updates,root);diag['fltrust_trust']=ts.tolist()
+    pair_seed(a.seed+10000*(r+1)+303);root=trusted_root_update(base,xr,yr,epochs=1,batch_size=min(128,len(xr)),lr=1e-3,fedprox_mu=a.mu,device=dev);delta,ts=fltrust(batch.updates,root);diag['fltrust_trust']=ts.tolist()
    else:
     key={'xtrust_u_median':'U','xtrust_ecal_median':'Ecal','xtrust_uecal_median':'U+Ecal','xtrust_uecal_trimmed':'U+Ecal'}[name];kind='trimmed' if name.endswith('trimmed') else 'median';delta,keep,pd0=prefilter_delta(batch,scores[key],cl['clean'][key],kind);ret=labels[keep];diag.update(pd0);diag.update({'retained_count':int(len(keep)),'retrospective_benign_retained':int((ret==0).sum()),'retrospective_malicious_retained':int((ret==1).sum())})
    models[name]=apply_delta(base,delta);utility=ev(models[name],E,Ey,dev);det={}
