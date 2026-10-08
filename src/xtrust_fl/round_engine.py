@@ -49,6 +49,7 @@ def build_round_batch(
     fedprox_mu: float = 0.0,
     device: str = "cpu",
     transform_update: Callable[[int, torch.Tensor], torch.Tensor] | None = None,
+    class_weights: torch.Tensor | None = None,
 ) -> RoundBatch:
     updates, counts, losses, kept_ids = [], [], [], []
     for cid in client_ids:
@@ -58,6 +59,7 @@ def build_round_batch(
         local_model, loss = local_train(
             global_model, x_train[idx], y_train[idx], epochs=epochs,
             batch_size=batch_size, lr=lr, fedprox_mu=fedprox_mu, device=device,
+            class_weights=class_weights,
         )
         delta = parameter_delta(local_model, global_model)
         if transform_update is not None:
