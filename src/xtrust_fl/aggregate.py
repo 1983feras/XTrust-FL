@@ -10,6 +10,12 @@ def _validate_updates(updates: list[torch.Tensor]) -> None:
     if any(u.shape!=shape for u in updates): raise ValueError("all updates must have the same shape")
     if any(not torch.isfinite(u.detach()).all().item() for u in updates): raise ValueError("updates must contain only finite values")
 
+def _validate_counts(sample_counts, expected_len):
+    if len(sample_counts)!=expected_len: raise ValueError("sample_counts must align with updates")
+    n=np.asarray(sample_counts,float)
+    if n.ndim!=1 or not np.all(np.isfinite(n)) or np.any(n<=0): raise ValueError("sample_counts must be finite and strictly positive")
+    return n
+
 def adaptive_clip_threshold(updates:list[torch.Tensor],mad_k:float=2.5)->float:
     _validate_updates(updates); norms=np.asarray([torch.linalg.vector_norm(u.detach().cpu()).item() for u in updates],float); med=float(np.median(norms)); mad=float(np.median(np.abs(norms-med))); return max(med+mad_k*1.4826*mad,1e-12)
 
@@ -33,9 +39,9 @@ def relative_trust_weights(client_scores:np.ndarray,clean_scores:np.ndarray,q_mi
 
 def _aggregate_with_q(updates,sample_counts,q,*,clip=False,mad_k=2.5,return_diagnostics=False,extra=None):
     _validate_updates(updates)
-    if not(len(updates)==len(sample_counts)==len(q)): raise ValueError("inputs must align")
-    n=np.asarray(sample_counts,float); q=np.asarray(q,float)
-    if np.any(n<=0) or not np.all(np.isfinite(n)) or not np.all(np.isfinite(q)): raise ValueError("weights must be finite and counts positive")
+    if len(q)!=len(updates): raise ValueError("inputs must align")
+    n=_validate_counts(sample_counts,len(updates)); q=np.asarray(q,float)
+    if q.ndim!=1 or not np.all(np.isfinite(q)): raise ValueError("weights must be finite")
     threshold=adaptive_clip_threshold(updates,mad_k) if clip else None; used=[]; before=[]; after=[]; factors=[]
     for u in updates:
         u0=u.detach().cpu(); b=float(torch.linalg.vector_norm(u0)); u1=clip_update(u0,threshold) if clip else u0; a=float(torch.linalg.vector_norm(u1)); used.append(u1); before.append(b); after.append(a); factors.append(1. if b<=1e-12 else a/b)
@@ -53,10 +59,11 @@ def relative_trust_aggregate(updates,sample_counts,client_scores,clean_scores,*,
     q,cal=relative_trust_weights(client_scores,clean_scores,q_min); cal.update({"q_min":float(q_min),"mapping":"clean_relative_sigmoid"}); return _aggregate_with_q(updates,sample_counts,q,clip=clip,mad_k=mad_k,return_diagnostics=return_diagnostics,extra=cal)
 
 def weighted_clipped_aggregate(updates:list[torch.Tensor],sample_counts:list[int],client_scores:np.ndarray,reject_threshold:float=.15,mad_k:float=2.5)->torch.Tensor:
-    _validate_updates(updates)
-    if not(len(updates)==len(sample_counts)==len(client_scores)):raise ValueError("updates, sample_counts, and client_scores must align")
-    scores=np.asarray(client_scores,float); threshold=adaptive_clip_threshold(updates,mad_k); weights=[]; clipped=[]
-    for u,n,s in zip(updates,sample_counts,scores): weights.append(float(n)*float(s) if float(s)>=reject_threshold else 0.); clipped.append(clip_update(u,threshold))
+    _validate_updates(updates); n=_validate_counts(sample_counts,len(updates))
+    scores=np.asarray(client_scores,float)
+    if scores.ndim!=1 or len(scores)!=len(updates) or not np.all(np.isfinite(scores)): raise ValueError("client_scores must align with updates and be finite")
+    threshold=adaptive_clip_threshold(updates,mad_k); weights=[]; clipped=[]
+    for u,ni,s in zip(updates,n,scores): weights.append(float(ni)*float(s) if float(s)>=reject_threshold else 0.); clipped.append(clip_update(u,threshold))
     weights=np.asarray(weights,float)
     if weights.sum()<=0:return torch.zeros_like(clipped[0])
     weights/=weights.sum(); out=torch.zeros_like(clipped[0])
@@ -64,6 +71,6 @@ def weighted_clipped_aggregate(updates:list[torch.Tensor],sample_counts:list[int
     return out
 
 def fedavg_aggregate(updates:list[torch.Tensor],sample_counts:list[int])->torch.Tensor:
-    _validate_updates(updates); w=np.asarray(sample_counts,float); w/=w.sum(); out=torch.zeros_like(updates[0].detach().cpu())
+    _validate_updates(updates); w=_validate_counts(sample_counts,len(updates)); w/=w.sum(); out=torch.zeros_like(updates[0].detach().cpu())
     for wi,u in zip(w,updates):out=out+float(wi)*u.detach().cpu()
     return out
